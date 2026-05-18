@@ -1,0 +1,75 @@
+version: '3.8'
+
+services:
+
+  # ─── PostgreSQL ──────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: spark-monitor-db
+    environment:
+      POSTGRES_DB:       spark_monitor_db
+      POSTGRES_USER:     postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d spark_monitor_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - spark-net
+
+  # ─── Monitor Service (Quarkus) ───────────────────────────────────────────────
+  monitor-service:
+    build:
+      context: ./services/monitor-service
+      dockerfile: Dockerfile
+    container_name: spark-monitor-service
+    ports:
+      - "8081:8081"
+    environment:
+      DB_HOST:     postgres
+      DB_PORT:     5432
+      DB_NAME:     spark_monitor_db
+      DB_USER:     postgres
+      DB_PASSWORD: postgres
+      # ── Utenti Frontend ─────────────────────────────────────────────────────
+      # Modifica queste variabili per cambiare le credenziali senza toccare il codice
+      ADMIN_PASSWORD:  admin        # utente: admin  / ruolo: ADMIN
+      VIEWER_PASSWORD: viewer       # utente: viewer / ruolo: VIEWER
+      SPARK_PASSWORD:  spark123     # utente: spark  / ruolo: ADMIN
+      # ── JWT Secret ──────────────────────────────────────────────────────────
+      # CAMBIA IN PRODUZIONE con una stringa casuale lunga almeno 32 caratteri
+      AUTH_JWT_SECRET: spark-monitor-secret-change-me-in-production
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - spark-net
+    restart: on-failure
+
+  # ─── Frontend React-Admin (Nginx) ────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: spark-monitor-frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - monitor-service
+    networks:
+      - spark-net
+    restart: on-failure
+
+volumes:
+  postgres_data:
+    name: spark-monitor-postgres-data
+
+networks:
+  spark-net:
+    name: spark-monitor-network
+    driver: bridge

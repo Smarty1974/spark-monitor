@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: monitor-service
+  namespace: spark-monitor
+  labels:
+    app: monitor-service
+spec:
+  selector:
+    app: monitor-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8081
+  type: ClusterIP
