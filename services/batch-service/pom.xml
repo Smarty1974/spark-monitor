@@ -85,6 +85,10 @@
       <groupId>io.quarkus</groupId>
       <artifactId>quarkus-arc</artifactId>
     </dependency>
+    <dependency>
+       <groupId>io.quarkus</groupId>
+       <artifactId>quarkus-swagger-ui</artifactId>
+    </dependency>
 
     <!-- GCP Dataproc Serverless — versione esplicita (fuori dal BOM) -->
     <dependency>
