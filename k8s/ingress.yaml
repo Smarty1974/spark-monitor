@@ -1,28 +1,25 @@
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: spark-monitor-ingress
-  namespace: spark-monitor
+  name: sbm-ingress
+  namespace: spark-batch-monitor
   annotations:
     nginx.ingress.kubernetes.io/rewrite-target: /$2
-    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
-    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
 spec:
   ingressClassName: nginx
   rules:
-    - host: spark-monitor.example.com
+    - host: sbm.example.com
       http:
         paths:
-          # API monitor-service
           - path: /api(/|$)(.*)
-            pathType: ImplementationSpecific
+            pathType: Prefix
             backend:
               service:
-                name: monitor-service
+                name: batch-service
                 port:
                   number: 80
-          # Frontend React-Admin (catch-all)
-          - path: /
+          - path: /()(.*)
             pathType: Prefix
             backend:
               service:

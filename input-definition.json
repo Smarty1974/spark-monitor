@@ -1,0 +1,148 @@
+{
+  "project": {
+    "name":        "spark-batch-monitor",
+    "groupId":     "com.example.sbm",
+    "version":     "1.0.0",
+    "description": "Monitoraggio batch Spark su GCP Dataproc Serverless con macchina a stati MongoDB",
+    "quarkusVersion": "3.8.1",
+    "javaVersion":    "21"
+  },
+
+  "database": {
+    "type": "mongodb",
+    "host": "localhost",
+    "port": 27017,
+    "name": "spark_monitor"
+  },
+
+  "auth": {
+    "enabled": true,
+    "type":    "jwt",
+    "issuer":  "https://sbm.example.com"
+  },
+
+  "services": [
+    {
+      "name": "batch-service",
+      "port": 8080,
+      "contextPath": "/api",
+
+      "database": {
+        "type": "mongodb",
+        "name": "spark_monitor",
+        "port": 27017
+      },
+
+      "entities": [
+        {
+          "name":       "BatchProcess",
+          "collection": "batch_processes",
+          "auditing":   true,
+          "softDelete": false,
+
+          "fields": [
+            { "name": "fileName",          "type": "String",  "nullable": false, "searchable": true, "length": 500 },
+            { "name": "bucketUri",         "type": "String",  "nullable": false, "searchable": true, "length": 1000 },
+            { "name": "batchResourceName", "type": "String",  "nullable": true,  "length": 1000 },
+            { "name": "state",             "type": "String",  "nullable": false,
+              "domain": ["FILE_RECEIVED","SPARK_SUBMITTED","COMPLETED","FAILED"] },
+            { "name": "errorMessage",      "type": "String",  "nullable": true },
+            { "name": "sparkJobId",        "type": "String",  "nullable": true,  "searchable": true },
+            { "name": "bucketConfigId",    "type": "String",  "nullable": true },
+            { "name": "fileSizeBytes",     "type": "Long",    "nullable": true },
+            { "name": "metadataJson",      "type": "String",  "nullable": true }
+          ],
+
+          "indexes": [
+            { "name": "idx_state_updatedAt", "fields": ["state","updatedAt"], "unique": false },
+            { "name": "idx_createdAt",       "fields": ["createdAt"],         "unique": false },
+            { "name": "idx_bucketUri",       "fields": ["bucketUri"],         "unique": false }
+          ]
+        },
+
+        {
+          "name":       "BucketConfig",
+          "collection": "bucket_configs",
+          "auditing":   true,
+          "softDelete": false,
+
+          "businessKey": ["bucketUri"],
+
+          "fields": [
+            { "name": "name",                  "type": "String",  "nullable": false, "searchable": true, "length": 255 },
+            { "name": "bucketUri",             "type": "String",  "nullable": false, "searchable": true, "length": 1000 },
+            { "name": "storageType",           "type": "String",  "nullable": false, "domain": ["GCS","S3"] },
+            { "name": "dataprocBatchTemplate", "type": "String",  "nullable": true },
+            { "name": "gcpProjectId",          "type": "String",  "nullable": true },
+            { "name": "gcpRegion",             "type": "String",  "nullable": true },
+            { "name": "filePattern",           "type": "String",  "nullable": true },
+            { "name": "triggerEnabled",        "type": "Boolean", "nullable": false, "defaultValue": "true" },
+            { "name": "maxConcurrentJobs",     "type": "Integer", "nullable": false, "defaultValue": "5" },
+            { "name": "description",           "type": "String",  "nullable": true }
+          ]
+        }
+      ],
+
+      "custom_endpoints": {
+        "endpoints": [
+          {
+            "method": "GET",
+            "path": "/batch-processes/stats",
+            "description": "Statistiche aggregate per la dashboard",
+            "response": "BatchStatsDTO"
+          },
+          {
+            "method": "GET",
+            "path": "/batch-processes/state-machine",
+            "description": "Definizione JSON della macchina a stati (per il frontend)",
+            "response": "StateMachineDTO"
+          },
+          {
+            "method": "POST",
+            "path": "/batch-processes/{id}/submit",
+            "description": "Transizione manuale FILE_RECEIVED → SPARK_SUBMITTED",
+            "response": "BatchProcessDTO"
+          },
+          {
+            "method": "POST",
+            "path": "/batch-trigger",
+            "description": "Avvia il flusso da trigger GCS/S3/manuale",
+            "response": "TriggerResponseDTO"
+          },
+          {
+            "method": "POST",
+            "path": "/batch-trigger/{processId}/resubmit",
+            "description": "Resubmit di un job fallito",
+            "response": "ResubmitResponseDTO"
+          },
+          {
+            "method": "GET",
+            "path": "/bucket-configs/active",
+            "description": "Solo le configurazioni bucket con triggerEnabled=true",
+            "response": "List<BucketConfigDTO>"
+          }
+        ]
+      }
+    }
+  ],
+
+  "frontend": {
+    "brandToggle":   false,
+    "defaultBrand":  "default"
+  },
+
+  "frontend_extras": {
+    "recharts": true,
+    "dashboard": {
+      "enabled":       true,
+      "statsEndpoint": "/api/batch-processes/stats",
+      "kpi_cards": [
+        { "label": "Processi totali",  "source": "total",          "color": "gray",   "icon": "Storage" },
+        { "label": "In esecuzione",    "source": "sparkSubmitted", "color": "warning","icon": "ElectricBolt" },
+        { "label": "Completati",       "source": "completed",      "color": "success","icon": "CheckCircle" },
+        { "label": "Success Rate",     "source": "successRate",    "color": "primary","icon": "TrendingUp",
+          "format": "percent" }
+      ]
+    }
+  }
+}

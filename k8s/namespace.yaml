@@ -1,7 +1,4 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: spark-monitor
-  labels:
-    app.kubernetes.io/name: spark-monitor
-    app.kubernetes.io/managed-by: kubectl
+  name: spark-batch-monitor

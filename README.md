@@ -1,217 +1,190 @@
-# Spark Monitor
+# Spark Batch Monitor
 
-Dashboard di monitoraggio batch Apache Spark — generata con quarkus-generator.
-
-## Stack tecnologico
-
-| Layer      | Tecnologia                              |
-|------------|------------------------------------------|
-| Backend    | Quarkus 3.8.1, Java 21, REST + JDBC     |
-| Database   | PostgreSQL 16                            |
-| Migrations | Flyway                                   |
-| Frontend   | React-Admin 5, Vite, Material UI         |
-| Deploy     | Docker Compose (dev), Kubernetes (prod)  |
+Sistema di monitoraggio job Apache Spark su **GCP Dataproc Serverless** con macchina a stati MongoDB, backend Quarkus 3.8.1 e frontend React-Admin + componenti IsycorePV.
 
 ---
 
-## Struttura del progetto
+## Architettura
 
 ```
-spark-monitor/
-├── services/
-│   └── monitor-service/          ← Quarkus REST API (porta 8081)
-│       ├── src/main/java/.../
-│       │   ├── entity/           5 entità
-│       │   ├── dto/              5 DTO con validazione
-│       │   ├── repository/       5 repository JDBC
-│       │   ├── service/          5 service
-│       │   └── resource/         5 resource JAX-RS
-│       └── src/main/resources/
-│           └── db/migration/     V1..V5 migrazioni Flyway
-├── frontend/                     ← React-Admin SPA (porta 3000)
-│   └── src/resources/            5 componenti (List/Show/Create/Edit)
-├── k8s/                          ← Manifest Kubernetes
-└── docker-compose.yml
+GCS/S3 Bucket
+    │ Eventarc / SNS / Manuale
+    ▼
+POST /api/batch-trigger
+    │  crea BatchProcess (FILE_RECEIVED)
+    │  submette batch a GCP Dataproc Serverless
+    │  aggiorna stato → SPARK_SUBMITTED
+    ▼
+MongoDB spark_monitor
+    ▲
+    │  ogni 30 s
+SparkMonitoringScheduler
+    │  polling GCP con proiezione minima
+    │  Retry 3x + Timeout 10s + Fallback
+    │  circuit-breaker timeout 2h
+    ▼
+COMPLETED / FAILED
+```
+
+### Macchina a stati
+
+```
+FILE_RECEIVED ──► SPARK_SUBMITTED ──► COMPLETED  (GCP: SUCCEEDED)
+                       │
+                       ├──► FAILED               (GCP: FAILED/CANCELLED/CANCELLING)
+                       └──► FAILED               (timeout 2h — circuit-breaker)
+
+FAILED ──► FILE_RECEIVED  (resubmit manuale)
 ```
 
 ---
 
-## Entità
+## Quickstart — docker compose up --build
 
-| Entità               | Tabella                | Note                              |
-|----------------------|------------------------|-----------------------------------|
-| SparkJob             | spark_jobs             | Soft delete, auditing             |
-| SparkJobExecution    | spark_job_executions   | FK → SparkJob, auditing           |
-| SparkMetric          | spark_metrics          | FK → SparkJobExecution, auditing  |
-| SparkSchedule        | spark_schedules        | Soft delete, FK → SparkJob        |
-| SparkAlert           | spark_alerts           | FK → SparkJob (nullable)          |
-
----
-
-## Avvio locale con Docker Compose
-
-### Prerequisiti
-- Docker >= 24
-- Docker Compose >= 2.20
-
-### Comandi
+### 1. Setup GCP Service Account (sviluppo locale)
 
 ```bash
-# Clona / entra nella directory
-cd spark-monitor
-
-# Build e avvio completo
-docker-compose up --build
-
-# Solo il database (per sviluppo)
-docker-compose up postgres
-
-# Stop
-docker-compose down
-
-# Stop + elimina volumi
-docker-compose down -v
+# Crea SA e scarica chiave
+gcloud iam service-accounts create sbm-sa
+gcloud projects add-iam-policy-binding YOUR_PROJECT \
+  --member="serviceAccount:sbm-sa@YOUR_PROJECT.iam.gserviceaccount.com" \
+  --role="roles/dataproc.editor"
+gcloud iam service-accounts keys create ./gcp-sa-key.json \
+  --iam-account sbm-sa@YOUR_PROJECT.iam.gserviceaccount.com
 ```
 
-### URL locali
+### 2. File .env
 
-| Servizio        | URL                                        |
-|-----------------|--------------------------------------------|
-| Frontend        | http://localhost:3000                      |
-| API             | http://localhost:8081/api                  |
-| Swagger UI      | http://localhost:8081/q/swagger-ui         |
-| Health          | http://localhost:8081/q/health             |
-| OpenAPI spec    | http://localhost:8081/q/openapi            |
+```env
+GCP_PROJECT_ID=my-gcp-project
+GCP_REGION=europe-west1
+GCP_SA_KEY_PATH=./gcp-sa-key.json
+```
+
+### 3. Avvio
+
+```bash
+docker compose up --build
+# oppure in background:
+docker compose up --build -d && docker compose logs -f batch-service
+```
+
+### 4. Accesso
+
+| Servizio   | URL                                        |
+|------------|--------------------------------------------|
+| Frontend   | http://localhost:3000  (admin / admin123)  |
+| Swagger UI | http://localhost:8080/api/swagger-ui       |
+| Health     | http://localhost:8080/q/health             |
 
 ---
 
-## Sviluppo backend (senza Docker)
+## API Reference
 
-```bash
-cd services/monitor-service
+### BatchProcess `/api/batch-processes`
 
-# Avvia il database
-docker-compose up postgres -d
+```
+GET    /                     lista paginata (X-Total-Count)
+GET    /{id}                 singolo processo
+POST   /                     crea (FILE_RECEIVED)
+PUT    /{id}                 aggiorna
+DELETE /{id}                 elimina
+GET    /search?q=            ricerca full-text
+GET    /stats                statistiche aggregate (dashboard)
+GET    /state-machine        definizione JSON state machine
+POST   /{id}/submit          FILE_RECEIVED → SPARK_SUBMITTED
+GET    /scheduler/status     stato scheduler  [admin]
+POST   /scheduler/pause      pausa scheduler  [admin]
+POST   /scheduler/resume     riprende scheduler [admin]
+```
 
-# Dev mode con hot-reload
-./mvnw quarkus:dev
+### BucketConfig `/api/bucket-configs`
 
-# Build produzione
-./mvnw package -DskipTests
+```
+GET    /           lista
+GET    /{id}       singola
+POST   /           crea
+PUT    /{id}       modifica
+DELETE /{id}       elimina
+GET    /search?q=  ricerca
+GET    /active     solo trigger abilitati
+```
+
+### Trigger `/api/batch-trigger`
+
+```
+POST /                    avvia flusso da file bucket
+POST /{id}/resubmit       resubmit da FAILED
+```
+
+### Auth `/api/auth`
+
+```
+POST /login   → { token, user }
+POST /logout
 ```
 
 ---
 
-## Sviluppo frontend
+## SparkMonitoringScheduler
 
-```bash
-cd frontend
+### Algoritmo tick (ogni 30s)
 
-# Installa dipendenze
-npm install
+```
+1. MongoDB: findSubmittedForPolling(50)
+   Proiezione minima: { _id, batchResourceName, fileName, updatedAt }
+   Hint indice: { state:1, updatedAt:1 }  ← CRITICO per performance
 
-# Dev mode (proxy verso localhost:8081)
-npm run dev
+2. Separa job scaduti (age >= 120 min) da job da controllare
 
-# Build produzione
-npm run build
+3. Job scaduti → transitionToFailed("Timeout Superato") + alert
+   (nessuna chiamata GCP)
+
+4. Job attivi → polling GCP in parallelo (max 10 thread)
+   - DataprocClient.getBatchStatus(batchResourceName)
+   - @Retry(3, 1s, jitter 200ms) + @Timeout(10s) + @Fallback
+   - Fallback → STATE_UNSPECIFIED → skip (riprova al tick successivo)
+
+5. Switch stato GCP:
+   SUCCEEDED  → transitionToCompleted() + notification
+   FAILED/CANCELLED/CANCELLING → transitionToFailed(errMsg) + alert
+   PENDING/RUNNING → skip (in corso)
+
+6. Fault isolation: ogni job in try-catch indipendente
+   concurrentExecution=SKIP: skip se tick precedente ancora running
 ```
 
----
+### Update atomici MongoDB
 
-## API REST — monitor-service
-
-Base URL: `http://localhost:8081/api`
-
-### SparkJobs `/spark-jobs`
-| Metodo | Path                  | Descrizione                      |
-|--------|-----------------------|----------------------------------|
-| GET    | /spark-jobs           | Lista paginata (page, size, sort)|
-| GET    | /spark-jobs/{id}      | Dettaglio job                    |
-| POST   | /spark-jobs           | Crea nuovo job                   |
-| PUT    | /spark-jobs/{id}      | Aggiorna job                     |
-| DELETE | /spark-jobs/{id}      | Soft delete job                  |
-| GET    | /spark-jobs/search?q= | Ricerca per nome                 |
-
-### SparkJobExecutions `/spark-job-executions`
-| Metodo | Path                              | Descrizione          |
-|--------|-----------------------------------|----------------------|
-| GET    | /spark-job-executions             | Lista paginata       |
-| GET    | /spark-job-executions?sparkJobId= | Filtra per job       |
-| POST   | /spark-job-executions             | Registra esecuzione  |
-| PUT    | /spark-job-executions/{id}        | Aggiorna esecuzione  |
-| DELETE | /spark-job-executions/{id}        | Elimina esecuzione   |
-
-### SparkMetrics `/spark-metrics`
-| Metodo | Path                          | Descrizione        |
-|--------|-------------------------------|--------------------|
-| GET    | /spark-metrics                | Lista paginata     |
-| GET    | /spark-metrics?executionId=   | Filtra per exec    |
-| POST   | /spark-metrics                | Inserisci metrica  |
-| PUT    | /spark-metrics/{id}           | Aggiorna metrica   |
-| DELETE | /spark-metrics/{id}           | Elimina metrica    |
-
-### SparkSchedules `/spark-schedules`
-| Metodo | Path                     | Descrizione           |
-|--------|--------------------------|-----------------------|
-| GET    | /spark-schedules         | Lista paginata        |
-| POST   | /spark-schedules         | Crea schedulazione    |
-| PUT    | /spark-schedules/{id}    | Aggiorna schedule     |
-| DELETE | /spark-schedules/{id}    | Soft delete schedule  |
-| GET    | /spark-schedules/search  | Cerca per nome        |
-
-### SparkAlerts `/spark-alerts`
-| Metodo | Path                  | Descrizione      |
-|--------|-----------------------|------------------|
-| GET    | /spark-alerts         | Lista alert      |
-| POST   | /spark-alerts         | Crea alert       |
-| PUT    | /spark-alerts/{id}    | Aggiorna alert   |
-| DELETE | /spark-alerts/{id}    | Elimina alert    |
+Le transizioni usano `updateOne` con filtro `{ _id, state_atteso }`:
+- Idempotenti: se il documento è già nello stato target, modified=0 (ok)
+- Anti-race-condition: più istanze dello scheduler non si sovrappongono
 
 ---
 
-## Deploy su Kubernetes
+## Frontend
+
+| Pagina            | Tipo        | Conformità skill       |
+|-------------------|-------------|------------------------|
+| Dashboard         | dashboard   | React-Admin custom     |
+| Inquiry Processi  | inquiry     | AdvancedSearch + PartitaTable + renderDetail + jumpBar |
+| Bucket Config     | master-data | AdvancedSearch + PartitaTable + Drawer |
+| Simulatore        | utility     | Form + tab navigation  |
+
+Mock data integrato in `pvClient.ts` — il frontend funziona anche senza backend.
+
+---
+
+## Deploy Kubernetes
 
 ```bash
-# Crea namespace
 kubectl apply -f k8s/namespace.yaml
-
-# Database
-kubectl apply -f k8s/postgresql.yaml
-
-# Secrets (MODIFICA LE PASSWORD prima!)
-kubectl apply -f k8s/monitor-service/secret.yaml
-
-# ConfigMap
-kubectl apply -f k8s/monitor-service/configmap.yaml
-
-# Servizi applicativi
-kubectl apply -f k8s/monitor-service/deployment.yaml
-kubectl apply -f k8s/monitor-service/service.yaml
-kubectl apply -f k8s/frontend.yaml
-
-# Ingress
+kubectl apply -f k8s/mongodb/mongodb.yaml
+kubectl rollout status deployment/mongodb -n spark-batch-monitor
+kubectl apply -f k8s/batch-service/deployment.yaml
+kubectl rollout status deployment/batch-service -n spark-batch-monitor
 kubectl apply -f k8s/ingress.yaml
-
-# Verifica
-kubectl get pods -n spark-monitor
-kubectl get svc  -n spark-monitor
+kubectl get all -n spark-batch-monitor
 ```
 
-### Cambio password in produzione
-
-```bash
-# Genera base64 della nuova password
-echo -n "nuovaPassword_sicura!" | base64
-
-# Modifica k8s/monitor-service/secret.yaml con il nuovo valore
-# Poi applica
-kubectl apply -f k8s/monitor-service/secret.yaml
-kubectl rollout restart deployment/monitor-service -n spark-monitor
-```
-
----
-
-## Generato con
-
-**quarkus-generator skill** — Claude Sonnet 4.6
+In produzione su GKE: usare **Workload Identity Federation** invece delle SA key files.

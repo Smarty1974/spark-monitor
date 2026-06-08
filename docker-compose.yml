@@ -1,75 +1,57 @@
-version: '3.8'
-
 services:
 
-  # ─── PostgreSQL ──────────────────────────────────────────────────────────────
-  postgres:
-    image: postgres:16-alpine
-    container_name: spark-monitor-db
+  # ── MongoDB ──────────────────────────────────────────────────────────────────
+  mongodb:
+    image: mongo:7-jammy
     environment:
-      POSTGRES_DB:       spark_monitor_db
-      POSTGRES_USER:     postgres
-      POSTGRES_PASSWORD: postgres
+      MONGO_INITDB_DATABASE: spark_monitor
     ports:
-      - "5432:5432"
+      - "27017:27017"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - mongo_data:/data/db
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d spark_monitor_db"]
-      interval: 5s
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Batch Service (Quarkus) ───────────────────────────────────────────────────
+  batch-service:
+    build: ./services/batch-service
+    ports:
+      - "8080:8080"
+    environment:
+      MONGO_URI:                     mongodb://mongodb:27017
+      MONGO_DB:                      spark_monitor
+      GCP_PROJECT_ID:                ${GCP_PROJECT_ID:-my-gcp-project}
+      GCP_REGION:                    ${GCP_REGION:-europe-west1}
+      GOOGLE_APPLICATION_CREDENTIALS: /app/gcp-sa-key.json
+      SPARK_MONITORING_ENABLED:      "true"
+      SPARK_MONITORING_CRON:         "0/30 * * * * ?"
+      SPARK_MONITORING_TIMEOUT_MINUTES: "120"
+      SPARK_MONITORING_MAX_PARALLEL: "10"
+      SPARK_MONITORING_FETCH_BATCH:  "50"
+    volumes:
+      # Monta il Service Account key GCP (sviluppo locale)
+      # In produzione: usare Workload Identity
+      - ${GCP_SA_KEY_PATH:-./gcp-sa-key-placeholder.json}:/app/gcp-sa-key.json:ro
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/q/health/ready || exit 1"]
+      interval: 10s
       timeout: 5s
       retries: 10
-    networks:
-      - spark-net
 
-  # ─── Monitor Service (Quarkus) ───────────────────────────────────────────────
-  monitor-service:
-    build:
-      context: ./services/monitor-service
-      dockerfile: Dockerfile
-    container_name: spark-monitor-service
-    ports:
-      - "8081:8081"
-    environment:
-      DB_HOST:     postgres
-      DB_PORT:     5432
-      DB_NAME:     spark_monitor_db
-      DB_USER:     postgres
-      DB_PASSWORD: postgres
-      # ── Utenti Frontend ─────────────────────────────────────────────────────
-      # Modifica queste variabili per cambiare le credenziali senza toccare il codice
-      ADMIN_PASSWORD:  admin        # utente: admin  / ruolo: ADMIN
-      VIEWER_PASSWORD: viewer       # utente: viewer / ruolo: VIEWER
-      SPARK_PASSWORD:  spark123     # utente: spark  / ruolo: ADMIN
-      # ── JWT Secret ──────────────────────────────────────────────────────────
-      # CAMBIA IN PRODUZIONE con una stringa casuale lunga almeno 32 caratteri
-      AUTH_JWT_SECRET: spark-monitor-secret-change-me-in-production
-    depends_on:
-      postgres:
-        condition: service_healthy
-    networks:
-      - spark-net
-    restart: on-failure
-
-  # ─── Frontend React-Admin (Nginx) ────────────────────────────────────────────
+  # ── Frontend (React-Admin + IsycorePV) ────────────────────────────────────────
   frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
-    container_name: spark-monitor-frontend
+    build: ./frontend
     ports:
       - "3000:80"
     depends_on:
-      - monitor-service
-    networks:
-      - spark-net
-    restart: on-failure
+      batch-service:
+        condition: service_healthy
 
 volumes:
-  postgres_data:
-    name: spark-monitor-postgres-data
-
-networks:
-  spark-net:
-    name: spark-monitor-network
-    driver: bridge
+  mongo_data:

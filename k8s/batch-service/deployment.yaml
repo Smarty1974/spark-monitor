@@ -1,0 +1,95 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: batch-service
+  namespace: spark-batch-monitor
+  labels:
+    app: batch-service
+    version: "1.0.0"
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: batch-service
+  template:
+    metadata:
+      labels:
+        app: batch-service
+    spec:
+      # Workload Identity SA (GKE) — per ADC automatico verso GCP
+      serviceAccountName: batch-service-sa
+      containers:
+        - name: batch-service
+          image: com.example.sbm/batch-service:1.0.0
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: batch-service-config
+            - secretRef:
+                name: batch-service-secret
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "200m"
+            limits:
+              memory: "1Gi"
+              cpu: "1000m"
+          readinessProbe:
+            httpGet:
+              path: /q/health/ready
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /q/health/live
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: batch-service
+  namespace: spark-batch-monitor
+  labels:
+    app: batch-service
+spec:
+  selector:
+    app: batch-service
+  ports:
+    - name: http
+      protocol: TCP
+      port: 80
+      targetPort: 8080
+  type: ClusterIP
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: batch-service-config
+  namespace: spark-batch-monitor
+data:
+  MONGO_URI:                        "mongodb://mongodb:27017"
+  MONGO_DB:                         "spark_monitor"
+  GCP_REGION:                       "europe-west1"
+  SPARK_MONITORING_ENABLED:         "true"
+  SPARK_MONITORING_CRON:            "0/30 * * * * ?"
+  SPARK_MONITORING_TIMEOUT_MINUTES: "120"
+  SPARK_MONITORING_MAX_PARALLEL:    "10"
+  SPARK_MONITORING_FETCH_BATCH:     "50"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: batch-service-secret
+  namespace: spark-batch-monitor
+type: Opaque
+data:
+  # ⚠️ SOSTITUIRE con base64 reale: echo -n "my-gcp-project" | base64
+  GCP_PROJECT_ID: bXktZ2NwLXByb2plY3Q=
